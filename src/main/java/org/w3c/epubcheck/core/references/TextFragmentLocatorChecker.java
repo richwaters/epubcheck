@@ -118,17 +118,6 @@ public final class TextFragmentLocatorChecker {
       return new MatchResult(0, false);
     }
 
-    // Fast path: no context terms and no end range
-    if (end == null && prefix == null && suffix == null) {
-      int count = 0;
-      int p = 0;
-      while (count < 2 && (p = docNorm.indexOf(start, p)) >= 0) {
-        count++;
-        p++;
-      }
-      return new MatchResult(count, false);
-    }
-
     int matches = 0;
     int pos = 0;
     int lastMatchStart = -1;
