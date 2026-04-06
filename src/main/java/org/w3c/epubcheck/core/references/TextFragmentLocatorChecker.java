@@ -102,7 +102,259 @@ public final class TextFragmentLocatorChecker {
   }
 
   // -------------------------------------------------------------------------
-  // Document text caching and extraction
+  // Matching
+  // -------------------------------------------------------------------------
+
+  private MatchResult countMatches(String docNorm, TextSelector sel) {
+    boolean hasEnd = sel.end != null;
+    boolean hasSuffix = sel.suffix != null;
+
+    String start = collapseAndStripEdges(sel.start, true, !(hasEnd || hasSuffix));
+    String end = hasEnd ? collapseAndStripEdges(sel.end, false, !hasSuffix) : null;
+    String prefix = sel.prefix != null ? collapseWhitespace(sel.prefix) : null;
+    String suffix = sel.suffix != null ? collapseWhitespace(sel.suffix) : null;
+
+    if (start.isEmpty()) {
+      return new MatchResult(0, false);
+    }
+
+    // Fast path: no context terms and no end range
+    if (end == null && prefix == null && suffix == null) {
+      int count = 0;
+      int p = 0;
+      while (count < 2 && (p = docNorm.indexOf(start, p)) >= 0) {
+        count++;
+        p++;
+      }
+      return new MatchResult(count, false);
+    }
+
+    int matches = 0;
+    int pos = 0;
+    int lastMatchStart = -1;
+    int lastMatchEnd = -1;
+
+    while (true) {
+      int i = docNorm.indexOf(start, pos);
+      if (i < 0) {
+        break;
+      }
+
+      if (end != null) {
+        // Check word boundary at start of match (only if no prefix)
+        if (prefix == null && isWordChar(start.codePointAt(0)) && !isWordBoundary(docNorm, i)) {          pos = i + 1;
+          continue;  // Try next start position
+        }
+
+        // Find the earliest end occurrence after start, satisfying context
+        int j = docNorm.indexOf(end, i + start.length());
+        boolean matched = false;
+
+        while (j >= 0) {
+          int matchEnd = j + end.length();
+
+          // Check word boundary at end
+          if (suffix == null && isWordChar(end.codePointBefore(end.length())) && !isWordBoundary(docNorm, matchEnd)) {
+            j = docNorm.indexOf(end, j + 1);
+            continue;
+          }
+
+          // Check prefix (tied to start position)
+          if (prefix != null && !prefixMatches(docNorm, i, prefix)) {
+            break;
+          }
+
+          // Check suffix
+          if (suffix != null && !suffixMatches(docNorm, matchEnd, suffix)) {
+            j = docNorm.indexOf(end, j + 1);
+            continue;
+          }
+
+          matched = true;
+          lastMatchStart = i;
+          lastMatchEnd = matchEnd;
+          break;
+        }
+
+        if (matched) {
+          matches++;
+          if (matches >= 2) {
+            return new MatchResult(matches, false);
+          }
+        }
+        pos = i + 1;
+      } else {
+        int matchEnd = i + start.length();
+
+        // Check word boundary at start (only if no prefix)
+        if (prefix == null && isWordChar(start.codePointAt(0)) && !isWordBoundary(docNorm, i)) {
+          pos = i + 1;
+          continue;
+        }
+
+        // Check word boundary at end
+        if (suffix == null && isWordChar(start.codePointBefore(start.length())) && !isWordBoundary(docNorm, matchEnd)) {
+          pos = i + 1;
+          continue;
+        }
+
+        // Check prefix
+        if (prefix != null && !prefixMatches(docNorm, i, prefix)) {
+          pos = i + 1;
+          continue;
+        }
+
+        // Check suffix
+        if (suffix != null && !suffixMatches(docNorm, matchEnd, suffix)) {
+          pos = i + 1;
+          continue;
+        }
+
+        matches++;
+        lastMatchStart = i;
+        lastMatchEnd = matchEnd;
+        if (matches >= 2) {
+          return new MatchResult(matches, false);
+        }
+        pos = i + 1;
+      }
+    }
+
+    if (matches != 1) {
+      return new MatchResult(matches, false);
+    }
+
+    // Exactly one match - check each parameter span for boundary crossings
+    boolean crossing = false;
+
+    // Check prefix span
+    if (sel.prefix != null) {
+      String p = collapseWhitespace(sel.prefix);
+      String before = docNorm.substring(0, lastMatchStart);
+      int beforeEnd = rstripSpaceAndSentinel(before);
+      String pNorm = stripRight(p);
+      int pStartInBefore = beforeEnd - pNorm.length();
+      crossing = hasBoundaryCrossing(docNorm, Math.max(0, pStartInBefore), beforeEnd);
+    }
+
+    // Check start term span
+    String startNorm = collapseAndTrim(sel.start);
+    crossing = crossing || hasBoundaryCrossing(docNorm, lastMatchStart,
+            lastMatchStart + startNorm.length());
+
+    // Check end term span (between end of start and end of match)
+    if (sel.end != null) {
+      crossing = crossing || hasBoundaryCrossing(docNorm,
+              lastMatchStart + startNorm.length(), lastMatchEnd);
+    }
+
+    // Check suffix span
+    if (sel.suffix != null) {
+      String s = collapseWhitespace(sel.suffix);
+      String after = docNorm.substring(lastMatchEnd);
+      int suffixStart = lstripSpaceAndSentinel(after);
+      String sNorm = stripRight(s);
+      crossing = crossing || hasBoundaryCrossing(docNorm,
+              lastMatchEnd + suffixStart, lastMatchEnd + suffixStart + sNorm.length());
+    }
+
+    return new MatchResult(matches, crossing);
+  }
+
+  private boolean prefixMatches(String docNorm, int pos, String prefix) {
+    int windowStart = Math.max(0, pos - prefix.length() - CONTEXT_WINDOW);
+    String before = docNorm.substring(windowStart, pos).replace(BLOCK_BOUNDARY, ' ');
+    before = MULTI_SPACE.matcher(before).replaceAll(" ");
+    String p = stripRight(prefix);
+
+    if (!stripRight(before).endsWith(p)) {
+      return false;
+    }
+
+    // If prefix has trailing space, require space in document before textStart
+    if (prefix.endsWith(" ")) {
+      if (stripRight(before).length() >= before.length()) {
+        return false;
+      }
+    }
+
+    // Ensure the prefix starts at a word boundary
+    String beforeStripped = stripRight(before);
+    int preStart = beforeStripped.length() - p.length();
+    if (preStart > 0 && isWordChar(p.codePointAt(0)) && !isWordBoundary(beforeStripped, preStart)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  private boolean suffixMatches(String docNorm, int pos, String suffix) {
+    int windowEnd = Math.min(docNorm.length(), pos + suffix.length() + CONTEXT_WINDOW);
+    String after = docNorm.substring(pos, windowEnd).replace(BLOCK_BOUNDARY, ' ');
+    after = MULTI_SPACE.matcher(after).replaceAll(" ");
+    String s = stripLeft(suffix);
+
+    if (!stripLeft(after).startsWith(s)) {
+      return false;
+    }
+
+    // If suffix has leading space, require space in document after textEnd
+    if (suffix.startsWith(" ")) {
+      if (stripLeft(after).length() >= after.length()) {
+        return false;
+      }
+    }
+
+    // Ensure the suffix ends at a word boundary
+    String afterStripped = stripLeft(after);
+    int sufEnd = s.length();
+    if (isWordChar(s.codePointBefore(s.length())) && !isWordBoundary(afterStripped, sufEnd)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  private boolean hasBoundaryCrossing(String docNorm, int start, int end) {
+    if (start < 0 || end > docNorm.length() || start >= end) {
+      return false;
+    }
+    return docNorm.substring(start, end).indexOf(BLOCK_BOUNDARY) >= 0;
+  }
+
+
+  /**
+   * Check if position is a word boundary per UAX #29.
+   */
+  private boolean isWordBoundary(String text, int position) {
+    if (position <= 0 || position >= text.length()) {
+      return true;
+    }
+
+    int prevCodePoint = text.codePointBefore(position);
+    int nextCodePoint = text.codePointAt(position);
+
+    // If either adjacent character is not a letter/digit, it's a boundary
+    if (!Character.isLetterOrDigit(prevCodePoint) || !Character.isLetterOrDigit(nextCodePoint)) {
+      return true;
+    }
+
+    // Both sides are letters/digits - use UAX #29 for cases like contractions
+    BreakIterator wordBreaker = BreakIterator.getWordInstance(Locale.ROOT);
+    wordBreaker.setText(text);
+    return wordBreaker.isBoundary(position);
+  }
+  /**
+   * Check if character is a word character (Unicode letter or digit).
+   * Used for quick boundary heuristics where full UAX #29 isn't needed.
+   */
+  private boolean isWordChar(int codePoint) {
+    return Character.isLetterOrDigit(codePoint);
+  }
+
+
+  // -------------------------------------------------------------------------
+  // Parsing
   // -------------------------------------------------------------------------
 
   private DocumentCache getDocumentCache(URL documentURL) {
@@ -346,256 +598,6 @@ public final class TextFragmentLocatorChecker {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Matching
-  // -------------------------------------------------------------------------
-
-  private MatchResult countMatches(String docNorm, TextSelector sel) {
-    boolean hasEnd = sel.end != null;
-    boolean hasSuffix = sel.suffix != null;
-
-    String start = collapseAndStripEdges(sel.start, true, !(hasEnd || hasSuffix));
-    String end = hasEnd ? collapseAndStripEdges(sel.end, false, !hasSuffix) : null;
-    String prefix = sel.prefix != null ? collapseWhitespace(sel.prefix) : null;
-    String suffix = sel.suffix != null ? collapseWhitespace(sel.suffix) : null;
-
-    if (start.isEmpty()) {
-      return new MatchResult(0, false);
-    }
-
-    // Fast path: no context terms and no end range
-    if (end == null && prefix == null && suffix == null) {
-      int count = 0;
-      int p = 0;
-      while (count < 2 && (p = docNorm.indexOf(start, p)) >= 0) {
-        count++;
-        p++;
-      }
-      return new MatchResult(count, false);
-    }
-
-    int matches = 0;
-    int pos = 0;
-    int lastMatchStart = -1;
-    int lastMatchEnd = -1;
-
-    while (true) {
-      int i = docNorm.indexOf(start, pos);
-      if (i < 0) {
-        break;
-      }
-
-      if (end != null) {
-        // Check word boundary at start of match (only if no prefix)
-        if (prefix == null && isWordChar(start.codePointAt(0)) && !isWordBoundary(docNorm, i)) {          pos = i + 1;
-          continue;  // Try next start position
-        }
-
-        // Find the earliest end occurrence after start, satisfying context
-        int j = docNorm.indexOf(end, i + start.length());
-        boolean matched = false;
-
-        while (j >= 0) {
-          int matchEnd = j + end.length();
-
-          // Check word boundary at end
-            if (suffix == null && isWordChar(end.codePointBefore(end.length())) && !isWordBoundary(docNorm, matchEnd)) {
-              j = docNorm.indexOf(end, j + 1);
-              continue;
-            }
-
-          // Check prefix (tied to start position)
-          if (prefix != null && !prefixMatches(docNorm, i, prefix)) {
-            break;
-          }
-
-          // Check suffix
-          if (suffix != null && !suffixMatches(docNorm, matchEnd, suffix)) {
-            j = docNorm.indexOf(end, j + 1);
-            continue;
-          }
-
-          matched = true;
-          lastMatchStart = i;
-          lastMatchEnd = matchEnd;
-          break;
-        }
-
-        if (matched) {
-          matches++;
-          if (matches >= 2) {
-            return new MatchResult(matches, false);
-          }
-        }
-        pos = i + 1;
-      } else {
-        int matchEnd = i + start.length();
-
-        // Check word boundary at start (only if no prefix)
-        if (prefix == null && isWordChar(start.codePointAt(0)) && !isWordBoundary(docNorm, i)) {
-            pos = i + 1;
-            continue;
-        }
-
-        // Check word boundary at end
-        if (suffix == null && isWordChar(start.codePointBefore(start.length())) && !isWordBoundary(docNorm, matchEnd)) {
-          pos = i + 1;
-          continue;
-        }
-
-        // Check prefix
-        if (prefix != null && !prefixMatches(docNorm, i, prefix)) {
-          pos = i + 1;
-          continue;
-        }
-
-        // Check suffix
-        if (suffix != null && !suffixMatches(docNorm, matchEnd, suffix)) {
-          pos = i + 1;
-          continue;
-        }
-
-        matches++;
-        lastMatchStart = i;
-        lastMatchEnd = matchEnd;
-        if (matches >= 2) {
-          return new MatchResult(matches, false);
-        }
-        pos = i + 1;
-      }
-    }
-
-    if (matches != 1) {
-      return new MatchResult(matches, false);
-    }
-
-    // Exactly one match - check each parameter span for boundary crossings
-    boolean crossing = false;
-
-    // Check prefix span
-    if (sel.prefix != null) {
-      String p = collapseWhitespace(sel.prefix);
-      String before = docNorm.substring(0, lastMatchStart);
-      int beforeEnd = rstripSpaceAndSentinel(before);
-      String pNorm = stripRight(p);
-      int pStartInBefore = beforeEnd - pNorm.length();
-      crossing = hasBoundaryCrossing(docNorm, Math.max(0, pStartInBefore), beforeEnd);
-    }
-
-    // Check start term span
-    String startNorm = collapseAndTrim(sel.start);
-    crossing = crossing || hasBoundaryCrossing(docNorm, lastMatchStart,
-            lastMatchStart + startNorm.length());
-
-    // Check end term span (between end of start and end of match)
-    if (sel.end != null) {
-      crossing = crossing || hasBoundaryCrossing(docNorm,
-              lastMatchStart + startNorm.length(), lastMatchEnd);
-    }
-
-    // Check suffix span
-    if (sel.suffix != null) {
-      String s = collapseWhitespace(sel.suffix);
-      String after = docNorm.substring(lastMatchEnd);
-      int suffixStart = lstripSpaceAndSentinel(after);
-      String sNorm = stripRight(s);
-      crossing = crossing || hasBoundaryCrossing(docNorm,
-              lastMatchEnd + suffixStart, lastMatchEnd + suffixStart + sNorm.length());
-    }
-
-    return new MatchResult(matches, crossing);
-  }
-
-  private boolean prefixMatches(String docNorm, int pos, String prefix) {
-    int windowStart = Math.max(0, pos - prefix.length() - CONTEXT_WINDOW);
-    String before = docNorm.substring(windowStart, pos).replace(BLOCK_BOUNDARY, ' ');
-    before = MULTI_SPACE.matcher(before).replaceAll(" ");
-    String p = stripRight(prefix);
-
-    if (!stripRight(before).endsWith(p)) {
-      return false;
-    }
-
-    // If prefix has trailing space, require space in document before textStart
-    if (prefix.endsWith(" ")) {
-      if (stripRight(before).length() >= before.length()) {
-        return false;
-      }
-    }
-
-    // Ensure the prefix starts at a word boundary
-    String beforeStripped = stripRight(before);
-    int preStart = beforeStripped.length() - p.length();
-    if (preStart > 0 && isWordChar(p.codePointAt(0)) && !isWordBoundary(beforeStripped, preStart)) {
-      return false;
-    }
-
-    return true;
-  }
-
-  private boolean suffixMatches(String docNorm, int pos, String suffix) {
-    int windowEnd = Math.min(docNorm.length(), pos + suffix.length() + CONTEXT_WINDOW);
-    String after = docNorm.substring(pos, windowEnd).replace(BLOCK_BOUNDARY, ' ');
-    after = MULTI_SPACE.matcher(after).replaceAll(" ");
-    String s = stripLeft(suffix);
-
-    if (!stripLeft(after).startsWith(s)) {
-      return false;
-    }
-
-    // If suffix has leading space, require space in document after textEnd
-    if (suffix.startsWith(" ")) {
-      if (stripLeft(after).length() >= after.length()) {
-        return false;
-      }
-    }
-
-    // Ensure the suffix ends at a word boundary
-    String afterStripped = stripLeft(after);
-    int sufEnd = s.length();
-    if (isWordChar(s.codePointBefore(s.length())) && !isWordBoundary(afterStripped, sufEnd)) {
-      return false;
-    }
-
-    return true;
-  }
-
-  private boolean hasBoundaryCrossing(String docNorm, int start, int end) {
-    if (start < 0 || end > docNorm.length() || start >= end) {
-      return false;
-    }
-    return docNorm.substring(start, end).indexOf(BLOCK_BOUNDARY) >= 0;
-  }
-
-
-  /**
-    * Check if position is a word boundary per UAX #29.
-    */
-  private boolean isWordBoundary(String text, int position) {
-    if (position <= 0 || position >= text.length()) {
-      return true;
-    }
-
-    int prevCodePoint = text.codePointBefore(position);
-    int nextCodePoint = text.codePointAt(position);
-
-    // If either adjacent character is not a letter/digit, it's a boundary
-    if (!Character.isLetterOrDigit(prevCodePoint) || !Character.isLetterOrDigit(nextCodePoint)) {
-      return true;
-    }
-
-    // Both sides are letters/digits - use UAX #29 for cases like contractions
-    BreakIterator wordBreaker = BreakIterator.getWordInstance(Locale.ROOT);
-    wordBreaker.setText(text);
-    return wordBreaker.isBoundary(position);
-  }
-  /**
-   * Check if character is a word character (Unicode letter or digit).
-   * Used for quick boundary heuristics where full UAX #29 isn't needed.
-   */
-  private boolean isWordChar(int codePoint) {
-   return Character.isLetterOrDigit(codePoint);
-   }
 
   // -------------------------------------------------------------------------
   // Supporting types
