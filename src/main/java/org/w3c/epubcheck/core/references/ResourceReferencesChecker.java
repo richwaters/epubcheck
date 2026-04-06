@@ -56,6 +56,8 @@ public class ResourceReferencesChecker
   private final EPUBVersion version;
   private final ReferenceRegistry referenceRegistry;
   private final ResourceRegistry resourceRegistry;
+  private final TextFragmentLocatorChecker textFragmentLocatorChecker;
+
   private Locale locale;
 
   private Set<URL> undeclared;
@@ -73,6 +75,8 @@ public class ResourceReferencesChecker
     this.locale = (report instanceof LocalizableReport)
         ? ((LocalizableReport) report).getLocale()
         : Locale.ENGLISH;
+    this.textFragmentLocatorChecker = new TextFragmentLocatorChecker(container, report);
+
   }
 
   public void check()
@@ -155,11 +159,22 @@ public class ResourceReferencesChecker
       // Check media overlays requirements
       if (reference.type == Reference.Type.OVERLAY_TEXT_LINK)
       {
-        // Check that references to XHTML indicate an element by ID
-        if (MIMEType.XHTML.is(targetMimetype) && fragment.getId().isEmpty())
+        // Check that references to XHTML indicate an element by ID or text directive
+        if (MIMEType.XHTML.is(targetMimetype) && fragment.getId().isEmpty()
+                && !fragment.toString().startsWith(":~:text="))
         {
           report.message(MessageId.MED_017, reference.location, fragment.toString());
         }
+        else if (MIMEType.XHTML.is(targetMimetype)
+                && fragment.toString().startsWith(":~:text="))
+        {
+          textFragmentLocatorChecker.check(
+                                      fragment.toString(),
+                                      reference.targetResource,
+                                      reference.location);
+        }
+
+
         // Check that references to SVG use a SVG fragment identifier
         else if (MIMEType.SVG.is(targetMimetype) && !fragment.isValid())
         {
