@@ -74,13 +74,11 @@ public final class TextFragmentLocatorChecker {
       return;
     }
 
-    DocumentCache cached = getDocumentCache(documentURL);
-    if (cached == null) {
+    DocumentCache docInfo = getDocumentCache(documentURL);
+    if (docInfo == null) {
       // Document couldn't be parsed; error already reported elsewhere
       return;
     }
-
-    String normalizedText = cached.normalizedText;
 
     for (String rawSelector : splitTextDirectives(fragment)) {
       TextSelector selector = parseTextSelector(rawSelector);
@@ -89,7 +87,7 @@ public final class TextFragmentLocatorChecker {
         continue;
       }
 
-      MatchResult result = countMatches(normalizedText, selector);
+      MatchResult result = countMatches(docInfo, selector);
 
       if (result.count == 0) {
         report.message(MessageId.MED_020, location, rawSelector);
@@ -105,7 +103,8 @@ public final class TextFragmentLocatorChecker {
   // Matching
   // -------------------------------------------------------------------------
 
-  private MatchResult countMatches(String docNorm, TextSelector sel) {
+  private MatchResult countMatches(DocumentCache docInfo, TextSelector sel) {
+    String docNorm = docInfo.normalizedText;
     boolean hasEnd = sel.end != null;
     boolean hasSuffix = sel.suffix != null;
 
@@ -162,6 +161,13 @@ public final class TextFragmentLocatorChecker {
           matched = true;
           lastMatchStart = i;
           lastMatchEnd = matchEnd;
+
+          // Check for duplicate resolved range
+          String matchKey = lastMatchStart + ":" + lastMatchEnd;
+          if (docInfo.seenMatches.contains(matchKey)) {
+            return new MatchResult(2, false );
+          }
+          docInfo.seenMatches.add(matchKey);
           break;
         }
 
@@ -205,6 +211,14 @@ public final class TextFragmentLocatorChecker {
         if (matches >= 2) {
           return new MatchResult(matches, false);
         }
+
+        // Might not be necessary but just in case a start,end already resolved to this
+        String matchKey = lastMatchStart + ":" + lastMatchEnd;
+        if (docInfo.seenMatches.contains(matchKey)) {
+          return new MatchResult(2, false);
+        }
+        docInfo.seenMatches.add(matchKey);
+
         pos = i + 1;
       }
     }
@@ -637,6 +651,7 @@ public final class TextFragmentLocatorChecker {
 
 final class DocumentCache {
   final String normalizedText;
+  final Set<String> seenMatches = new HashSet<>();
 
   DocumentCache(String normalizedText) {
     this.normalizedText = normalizedText;
