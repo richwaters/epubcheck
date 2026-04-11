@@ -130,15 +130,30 @@ public final class TextFragmentLocatorChecker {
 
       if (end != null) {
         // Check word boundary at start of match (only if no prefix)
-        if (prefix == null && isWordChar(start.codePointAt(0)) && !isWordBoundary(docNorm, i)) {          pos = i + 1;
+        if (prefix == null && isWordChar(start.codePointAt(0)) && !isWordBoundary(docNorm, i)) {
+          pos = i + 1;
           continue;  // Try next start position
         }
 
+        // Range matches must also be word bounded after start
+        int startEnd = i + start.length();
+        if (isWordChar(start.codePointBefore(start.length())) && !isWordBoundary(docNorm, startEnd)) {
+          pos = i + 1;
+          continue;
+        }
+
         // Find the earliest end occurrence after start, satisfying context
-        int j = docNorm.indexOf(end, i + start.length());
+        int j = docNorm.indexOf(end, startEnd);
+
         boolean matched = false;
 
         while (j >= 0) {
+          // Range matches must also be word bounded before end
+          if (isWordChar(end.codePointAt(0)) && !isWordBoundary(docNorm, j)) {
+            j = docNorm.indexOf(end, j + 1);
+            continue;
+          }
+
           int matchEnd = j + end.length();
 
           // Check word boundary at end
@@ -247,8 +262,9 @@ public final class TextFragmentLocatorChecker {
 
     // Check end term span (between end of start and end of match)
     if (sel.end != null) {
+      String endNorm = collapseAndTrim(sel.end);
       crossing = crossing || hasBoundaryCrossing(docNorm,
-              lastMatchStart + startNorm.length(), lastMatchEnd);
+              lastMatchEnd - endNorm.length(), lastMatchEnd);
     }
 
     // Check suffix span
